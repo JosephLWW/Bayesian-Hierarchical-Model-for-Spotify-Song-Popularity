@@ -7,5 +7,5 @@ In this project, our aim is to disentangle the effects of some song attributes o
 
 ### Dataset
 
-I found a publicly available dataset on kaggle that gathers the top 2000 tracks on Spotify from 1956 to 2019. This dataset has no missing values, is clean, well-organized and has a wide set of variables that we can work on. More information and access to the dataset in the link below:
+I used a publicly available dataset on Kaggle that gathers the top 2000 tracks on Spotify up until 2019. This dataset has no missing values, is clean, well-organized and has a wide set of variables that we can work on. More information and access to the dataset in the link below:
 https://www.kaggle.com/datasets/iamsumat/spotify-top-2000s-mega-dataset
