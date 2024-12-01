@@ -1,0 +1,395 @@
+---
+title: "Bayesian Modelling"
+author: "Joseph Li Wan Wang"
+date: "2024-08-17"
+output:
+  html_notebook:
+    toc: true
+    toc_float: true
+    code_folding: show
+  html_document:
+    toc: true
+    df_print: paged
+---
+
+# Bayesian Modelling Project - Bayesian Hierarchical Model for Spotify Song Popularity
+
+### ***Joseph Li Wan Wang - Quantitative Data Science Methods: Psychometrics, Econometrics and Machine Learning***
+
+## Introduction
+
+What makes a song popular? There is an unmeasurable number of features that might affect how well a certain song will behave in the charts. Those variables interact with each other in such complex ways that artists usually claim that their success is mostly dependent on luck. This might be true, but as data scientists we ahould at least attempt to estimate and model the phenomenae that contribute to a song's popularity, since the music industry is one of the most important ones in the field of entertainment.
+
+In this project, our aim is to disentangle the effects of some song attributes on their popularity using Bayesian modeling. We will build and compare different models *(namely fully pooled, hierarchical, and fully unpooled)* to predict the popularity of a song based on its features and genre. Our focus will be on the hierarchical model approach, which allows us to model both the individual effects at the song level and the group-level effects at the genre level, leveraging the strengths of Bayesian inference to capture uncertainty and provide more robust estimates than more classic approaches that would provide simple linear estimates for each feature, which is an unlikely way of how the underlying data generating process might be producing our data.
+
+## Data exploration and Pre-Processing
+
+Firstly, we want to choose explore the dataset we will use to carry out our project. I found a publicly available dataset on kaggle that gathers the top 2000 tracks on Spotify from 1956 to 2019. This dataset has no missing values, is clean, well-organized and has a wide set of variables that we can work on. More information and access to the dataset in the link below:
+
+<https://www.kaggle.com/datasets/iamsumat/spotify-top-2000s-mega-dataset>
+
+We start the dataset exploration by visualizing how the data is distributed for each quantitative variable in histograms. Based on this visual assessment we can choose which variables to work on for this project.
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(bayesplot)
+
+# Load the dataset
+data <- read.csv("C:\\Users\\Joseph\\Desktop\\Bayesian Modelling\\Assignment\\Spotify-2000.csv", header = TRUE, sep = ";")
+
+# Filter for the numeric features that can be plotted in a histogram
+numeric_data <- data %>% select_if(is.numeric)
+
+# Loop for the histograms
+for (feature in names(numeric_data)) {
+  p <- ggplot(data = numeric_data, aes_string(x = feature)) +
+    geom_histogram(bins = 50, color = "black") +
+    labs(title = paste("Histogram of", feature),
+         x = feature) +
+    theme_minimal()
+  
+  # Print the plot
+  print(p)
+}
+```
+
+Out of simplicity purposes we will select for our analysis the best and most nicely normally distributed features for future analysis in our project: Popularity, Danceability and Length.
+
+Next, we will plot the distribution of the popularity conditioned on each and every single genre to asses visually if they might be a genre dependent variable or not. My knowledge about music features does not suffice to know it exactly, so this is the best method of assessment i could think of.
+
+```{r}
+
+# Define the list of features
+features <- c("Popularity", "Danceability", "Length")
+
+# Loop over each feature to create a plot
+for (feature in features) {
+  # Reorder genres (We use the median to account for outliers)
+  data <- data %>%
+    mutate(Genre = reorder(Genre, get(feature), FUN = median))
+  
+  # Generate a plot for each feature by genre
+  p <- ggplot(data, aes_string(x = "Genre", y = feature)) +
+    geom_boxplot() +
+    coord_flip() +
+    labs(title = paste("Distribution of", feature, "by Genre"),
+         x = "",
+         y = feature) +
+    theme_minimal() +
+    theme(axis.text.y = element_blank(), # Eliminate genre names because they are not readable
+          axis.ticks.y = element_blank())
+  
+  # Print the plot
+  print(p)
+}
+
+```
+
+By having a rough look on the inter-quartile distance with respect to the means, we can see that there are some genres that have a significantly higher popularity than others. This is a good indicator that grouping by genre might be a good idea to model the popularity of a song. Something similar happens with the danceability feature, but not with the length of the song. Therefore, danceability should be included in the second level of our model (genre), while length should be in the first level (song).
+
+In the next step we will adapt the "length" feature to be able to be used with the same priors as the other variables. For this purpose, we will delete the outliers and rescale to fit the 0 to 100 model like the other features.
+
+```{r}
+
+# Define outliers
+lower_bound <- quantile(data$Length, 0.01)
+upper_bound <- quantile(data$Length, 0.96)
+
+# Filter out the outliers
+data <- data %>%
+  filter(Length >= lower_bound & Length <= upper_bound)
+
+# Standardize the Length variable to have a range from 0 to 100
+data <- data %>%
+  mutate(Length_standardized = (Length - min(Length)) / (max(Length) - min(Length)) * 100)
+
+# Plot the standardized Length variable
+ggplot(data, aes(x = Length_standardized)) +
+  geom_histogram(bins = 50, color = "black") +
+  labs(title = "Standardized Length (0 to 100)",
+       x = "Length") +
+  theme_minimal()
+```
+
+Now, the song length feature looks much better and normally distributed to use for our analeses.
+
+Once the data has been explored and pre-processed, we can continue by designing the three models we want to compare.
+
+## Model Setting
+
+In the next step we will build the models we want to compare using weakly informative priors. This task will be made easier knowing that our variables are roughly normally distributed and range from 0 to 100.
+
+### Fully Pooled Model
+
+For this model we ignore any hierarchical genre dependency. Therefore, all individual songs are pooled together in a very simplified model.
+
+Assuming all our variables are normally distributed the model would be the following:
+
+$$\text{Popularity}_i \sim \mathcal{N}(\mu + \beta_{\text{Danceability}} \times \text{Danceability}_i + \beta_{\text{Length}} \times \text{Length}_i, \sigma^2)$$
+
+To run the model we will specify weakly informative priors:
+
+$µ ∼ N (50, 20)$
+
+$\beta_{Danceability} ∼ N(0,20)$
+
+$\beta_{Length} ∼ N(0,20)$
+
+$σ ∼ lognormal(1, 1)$
+
+```{r}
+if (!require("rjags")) install.packages("rjags")
+if (!require("coda")) install.packages("coda")
+if (!require("ggplot2")) install.packages("ggplot2")
+
+library(rjags)
+library(coda)
+library(ggplot2)
+
+# Set seed for reproducibility
+set.seed(123)
+
+fpm_string <- "
+model{
+  # Likelihood
+  for (i in 1:N) {
+    Popularity[i] ~ dnorm(y[i], tau)
+    y[i] <- mu + beta_danceability * Danceability[i] + beta_length * Length[i]
+  }
+  # Priors
+  mu ~ dnorm(50, 0.0025)  # Prior for intercept (Around the mean)
+  beta_danceability ~ dnorm(0, 0.0025)  # Danceability slope (No a-priori effect)
+  beta_length ~ dnorm(0, 0.0025)  # Length slope (No a-priori effect)
+  tau <- 1/(sigma * sigma)
+  sigma ~ dlnorm(1, 1)
+}
+"
+
+```
+
+### Fully Unpooled (Heterogeneous) Model
+
+In this case we ignore dependencies between genres and model each genre separately. This results in a overly complex model prone to overfitting because we allow for each genre to come from a different distribution (every genre has it's own mean and sd: $Genre_{ij} \sim \mathcal{N}(\mu_j, \sigma_j)$):
+
+$$\text{Popularity}_{ij} \sim \mathcal{N}(\mu_j + \beta_{\text{Danceability}_j} \times \text{Danceability}_{ij} + \beta_{\text{Length}_j} \times \text{Length}_{ij}, \sigma_j^2)$$
+
+Specifying the same priors as before:
+
+```{r}
+fum_string <- "
+model {
+  # Likelihood for every song
+  for (i in 1:N) {
+    Popularity[i] ~ dnorm(y[i], tau[i])
+    y[i] <- genremu[genre[i]] + beta_danceability[genre[i]] * Danceability[i] + beta_length[genre[i]] * Length[i]
+    tau[i] <- genretau[genre[i]]
+  }
+  
+  # Priors
+  for (j in 1:J) {
+    genremu[j] ~ dnorm(50, 0.0025)  # Intercept
+    beta_danceability[j] ~ dnorm(0, 0.0025)  # Danceability slope
+    beta_length[j] ~ dnorm(0, 0.0025)  # Length slope
+    genresigma[j] ~ dlnorm(1, 1)  # Variance
+    genretau[j] <- 1 / (genresigma[j] * genresigma[j])
+  }
+}
+"
+```
+
+### Hierarchical Model
+
+This model lies in between the last two in terms of the complexity-generalizebility trade-off. It accounts for some differences among genres for our estimators, but also takes into consideration that genres are related and come from the same distribution which in our case is the music industry and the listeners.
+
+The follows is as it follows:
+
+$$
+\text{Popularity}_{ij} \sim \mathcal{N}\left(\mu_j + \beta_{\text{Danceability}_j} \times \text{Danceability}_{ij} + \beta_{\text{Length}_j} \times \text{Length}_{ij}, \sigma^2\right)
+$$
+
+Where we can decompose the estimators such as:
+
+$$\mu_j = \mu_{Genre}+\nu_{0j}$$ $$
+\beta_{\text{Danceability}_j} = \beta_{\text{Danceability}} + \nu_{1j}
+$$
+
+$$
+\beta_{\text{Length}_j} = \beta_{\text{Length}} + \nu_{2j}
+$$
+
+And use $\mu_{Genre}$, $\beta_{\text{Danceability}}$ and $\beta_{\text{Length}}$ as the average (mu) estimators for the model. The priors and hyperpriors have been specified according to the same parameters that we have used for the last two models
+
+```{r}
+
+bhm_string <- "
+model{
+  
+  # likelihood (for every song)
+  for (i in 1:N){
+    Popularity[i] ~ dnorm(mu[i], tau)
+    mu[i] <- genremu[genre[i]] + beta_danceability[genre[i]] * Danceability[i] + beta_length[genre[i]] * Length[i]
+  }
+  
+  # priors
+  for (j in 1:J){
+    genremu[j] ~ dnorm(genremean, genretau)
+    beta_danceability[j] ~ dnorm(mu_beta_danceability, tau_beta_danceability)
+    beta_length[j] ~ dnorm(mu_beta_length, tau_beta_length)
+  }
+  
+  sigma ~ dlnorm(1, 1)
+  
+  # hyper priors
+  genremean ~ dnorm(50, 0.0025)
+  genresigma ~ dlnorm(-1, 1)
+  
+  mu_beta_danceability ~ dnorm(0, 0.0025)
+  sigma_beta_danceability ~ dlnorm(1, 1)
+  
+  mu_beta_length ~ dnorm(0, 0.0025)
+  sigma_beta_length ~ dlnorm(1, 1)
+  
+  # Derived parameters:
+  tau <- 1/(sigma * sigma)
+  genretau <- 1/(genresigma * genresigma)
+  tau_beta_danceability <- 1 / (sigma_beta_danceability * sigma_beta_danceability)
+  tau_beta_length <- 1 / (sigma_beta_length * sigma_beta_length)
+  
+}
+"
+```
+
+## Run the models
+
+```{r}
+# Prepare the data list for JAGS
+jags_data <- list(
+  Popularity = data$Popularity,
+  Danceability = data$Danceability,
+  Length = data$Length_standardized,
+  genre = as.numeric(as.factor(data$Genre)),  # Convert genre to numeric
+  J = length(unique(data$Genre)),
+  N = nrow(data)
+)
+```
+
+### Fully Pooled Model
+
+```{r}
+# Fully Pooled Model
+fpm_model <- jags.model(textConnection(fpm_string), data = jags_data, n.chains = 3, n.adapt = 1000)
+update(fpm_model, n.iter = 1000) # Burn-in
+fpm_samples <- coda.samples(fpm_model, variable.names = c("mu", "beta_danceability", "beta_length", "sigma"), n.iter = 5000)
+
+# Prepare data to plot
+fpm_samples_df <- as.matrix(fpm_samples)
+
+# Plot the MCMC processes for each of our estimators
+mcmc_hist(fpm_samples_df)
+traceplot(fpm_samples)
+```
+
+We can see that our parameters have converged around a certain range of values in all cases, and each of them is nicely distributed in a gaussian bell probably due to the pooling that allows us to use all of our sample. However this simplification implies loss of important information that could be used to interpret the data. In the next instances we will see more nuanced models.
+
+### Fully Unpooled Model
+
+```{r}
+# Fully Unpooled Model
+fum_model <- jags.model(textConnection(fum_string), data = jags_data, n.chains = 3, n.adapt = 1000)
+update(fum_model, n.iter = 1000)
+fum_samples <- coda.samples(fum_model, variable.names = c("genremu","beta_danceability", "beta_length", "genresigma", "genretau"), n.iter = 5000)
+
+# Prepare data to plot
+fum_samples_df <- as.data.frame(as.matrix(fum_samples))
+
+# Select the first 3 genres for simplicity
+selected_genres <- 1:3
+
+# Get column names for the selected genres
+danceability_cols <- paste0("beta_danceability[", selected_genres, "]")
+length_cols <- paste0("beta_length[", selected_genres, "]")
+genremu_cols <- paste0("genremu[", selected_genres, "]")
+genresigma_cols <- paste0("genresigma[", selected_genres, "]")
+
+# Combine all selected columns into a single list
+selected_cols <- c(danceability_cols, length_cols, genremu_cols, genresigma_cols)
+
+# Subset the dataframe to only include these columns
+selected_df <- fum_samples_df[, selected_cols]
+
+# Create traceplots for each selected column
+for (col in colnames(selected_df)) {
+  trace <- mcmc_trace(as.matrix(fum_samples_df[col]), pars = col)
+  print(trace)
+}
+
+# Create histograms for each selected column
+for (col in colnames(selected_df)) {
+  hist <- mcmc_hist(as.matrix(fum_samples_df[col]), pars = col)
+  print(hist)
+}
+```
+
+As we can see in these plots, the parameters converge differently for different genres and end up being distributed very differently from each other. Some genres behave better than the others, and we can also expect to obtain very different point estimates for each of them. It is important to notice that sometimes tihs might be due to some genres being more common than others, causing some of them to be underrepresented in the sample.
+
+### Bayesian Hierarchical Model
+
+```{r}
+# Parameters to monitor
+parameters <- c("sigma", "genremean", "genresigma", "tau", "genretau", "mu_beta_danceability", "mu_beta_length")
+
+# Run Bayesian Hierarchical Model
+bhm_model <- jags.model(textConnection(bhm_string), data = jags_data, n.chains = 3, n.adapt = 1000)
+update(bhm_model, n.iter = 1000) # Burn-in
+bhm_samples <- coda.samples(bhm_model, variable.names = parameters, n.iter = 5000)
+
+# Prepare data to plot
+bhm_samples_df <- as.matrix(bhm_samples)
+
+# Plot the MCMC processes for each of our estimators
+mcmc_hist(bhm_samples_df)
+traceplot(bhm_samples)
+```
+
+In the histograms we can observe very nicely distributed parameter values centered around similar values as in the fully pooled model, but with generally a lower range of uncertainty (Credible intervals). For the traceplot we can also observe convergence around that range of values although some of the MCMC processes wiggle ocassionally slightly.
+
+In this case we can also interpret the effect that genre can have on popularity by comparing the "genremean" fixed intercept and the "genresigma" random component of that same intercept, as well as the beta effect of the genre dependent variable danceability and its random variance. This interpretation is simple in our model at first glance because all parameters seem to be normally distributed.
+
+## Model comparison
+
+To evaluate the fit of our models, we will use the Deviance Information Criterion (DIC), since the WAIC and LOO-CV are more computationally expensive. This indicator Uses the posterior mean point estimate to evaluate the log-likelihood.
+
+$$\hat{elpd}_{\text{DIC}} = \log  \left[ p(\vec{x} \mid \hat{\theta}_{\text{Bayes}}) \right] - k_{\text{DIC}}$$
+
+with the bias correction term
+
+$$k_{\text{DIC}} = 2 \, \text{var}_{\text{posterior}} \left( \log \left[ p(\vec{x} \mid \theta) \right] \right)$$
+
+```{r}
+
+# Calculate DIC values
+dic_fpm <- dic.samples(fpm_model, n.iter = 5000)
+dic_fum <- dic.samples(fum_model, n.iter = 5000)
+dic_bhm <- dic.samples(bhm_model, n.iter = 5000)
+
+# Turn into an interpreteable df
+dic_values <- data.frame(
+  Model = c("Fully Pooled", "Fully Unpooled", "Hierarchical"),
+  DIC = c(sum(dic_fpm$deviance), sum(dic_fum$deviance), sum(dic_bhm$deviance))
+)
+
+print(dic_values)
+```
+
+Our results show the lowest DIC for the fully unpooled model followed by the hierarchical model, and lastly, by the fully pooled one. This means that the fully unpooled model fits the data better than the others, which is due to its high complexity. However, we have to know that this model is difficult to generalize to other settings, so we need a more flexible model like the Hierarchical one.
+
+The hierarchical model has a DIC which lies in between the other two, which is what we expected at the beginning since it also lies in-between both in terms of complexity. This model accounts for the hierarchical structure while taking into account the dependencies between groups, making it flexible and interpretable at the same time. Lastly, we have the fully pooled model, which explains the data in the least effective way, but gives the most simple and summarized estimates to interpret.
+
+To interpret these results, it is important to remark two points: First, this is not a statistical significance test that allows us to contrast different models. And second, bayesian modelling is not about getting better predictions from our model, but to get our model closer to the complex and unpredictable reality.
+
+In conclusion, depending on our research goals we can choose one of the different models proposed here. However, the model that is more flexible and easy to interpret, while not loosing to much of the nuances underlying the data is the hierarchical model.
+
+## Future Studies
+
+For future projects it would be interesting to take into account also artist specific features into a three level hierarchical model. In this analysis we haven't considered a factor that might influence the popularity of a song in such a big way as the artist itself because it would make this project too complex for my time constraints and capabilities. This could be a very interesting extension of the current analysis, as it would allow us to understand how much of the popularity of a song is due to the artist's prior popularity in its current career (for example) and how much is due to the song's/genre's features themselves and the popularity of the genre. Therefore, further research is required to approach the problematic of this topic.
